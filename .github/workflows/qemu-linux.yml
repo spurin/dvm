@@ -1,0 +1,51 @@
+name: qemu-linux
+
+# Builds the fully-static Linux QEMU artifacts (amd64 + arm64) in containers on
+# native Linux runners. Proves static linkage and that KVM/libslirp are compiled
+# in; the KVM *boot* test is manual (hosted runners lack /dev/kvm nested virt).
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "build/qemu/Dockerfile.linux"
+      - "build/qemu/build-linux.sh"
+      - "build/qemu/verify-linux.sh"
+      - "build/qemu/archive.sh"
+      - "build/qemu/versions.env"
+      - ".github/workflows/qemu-linux.yml"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm   # native Apple-silicon-class arm64 runner
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build + verify static QEMU (${{ matrix.arch }})
+        working-directory: build/qemu
+        run: ./build-linux.sh ${{ matrix.arch }}
+
+      - name: Archive binaries (+ sha256)
+        working-directory: build/qemu
+        run: ./archive.sh linux-${{ matrix.arch }} stage-linux-${{ matrix.arch }}/stage
+
+      - name: Upload binary archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-linux-${{ matrix.arch }}
+          path: |
+            build/qemu/qemu-linux-${{ matrix.arch }}-*.tar.gz
+            build/qemu/qemu-linux-${{ matrix.arch }}-*.tar.gz.sha256
+          if-no-files-found: error

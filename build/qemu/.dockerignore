@@ -1,0 +1,8 @@
+# Keep the Docker build context tiny — exclude all local build scratch.
+.work/
+.deps/
+stage/
+stage-linux-*/
+oci-layout/
+*.tar.gz
+stage-windows-*/

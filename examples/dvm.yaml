@@ -1,0 +1,75 @@
+# Example dvm configuration, runnable as-is against the spurin cloud images.
+#
+# dvm boots a VM from components pulled as OCI artifacts and forwards guest ports
+# to the host. Every field below can also be set with a CLI flag; flags take
+# precedence over this file. Component references may be OCI refs
+# (oci://registry/repo:tag) or local paths.
+#
+# This one file works on macOS, Linux and Windows: the cross-arch tags resolve
+# to the guest arch, the qemu engine uses 'rootfs' (qcow2 or raw), and the macOS
+# vz engine uses 'rootfs_vz' (raw, since Virtualization.framework cannot read
+# qcow2).
+#
+# Run it:   dvm start --config examples/dvm.yaml --guest-password lab
+# Stop it:  press Ctrl-C in that terminal (start runs in the foreground)
+# Then:     ssh -p 2222 ubuntu@127.0.0.1     (password: lab)
+
+name: dvm
+
+components:
+  # Cross-arch (multi-arch) tags: the same reference resolves to the entry
+  # matching guest.arch below. Use the *-amd64 / *-arm64 tags to pin one arch.
+  kernel: oci://docker.io/spurin/ubuntu-cloudimg-24.04:6.8.0-124-generic-vmlinux
+  initrd: oci://docker.io/spurin/ubuntu-cloudimg-24.04:6.8.0-124-generic-initrd
+  # qemu engine (default, all OSes): qcow2 is smaller; raw ext4 also works.
+  rootfs: oci://docker.io/spurin/ubuntu-cloudimg-24.04:6.8.0-124-generic-qcow2
+  # macOS vz engine (--engine vz): must be a raw image. Ignored by qemu.
+  rootfs_vz: oci://docker.io/spurin/ubuntu-cloudimg-24.04:6.8.0-124-generic-ext4
+  # A local extracted QEMU directory (brew install qemu, or a release
+  # qemu-<platform>.tar.gz). The vz engine needs no QEMU.
+  qemu_dir: /opt/homebrew/opt/qemu/bin
+
+guest:
+  arch: arm64          # x86_64 | arm64 (defaults to the host's native arch)
+  memory_mb: 2048
+  cpus: 2
+  persist: true
+
+qemu:
+  display: none
+  accel_fallback: true
+  accel_preference:
+    windows: ["whpx", "tcg"]
+    linux: ["kvm", "tcg"]
+    darwin: ["hvf", "tcg"]
+
+network:
+  # cloud-init | kernel-dhcp | kernel-static | none
+  ip_config: cloud-init
+  bind_address: 127.0.0.1   # 0.0.0.0 requires allow_public_bind: true
+  allow_public_bind: false
+  ssh_port: 2222            # expose guest sshd on localhost:2222 (0 = disabled)
+
+# Host -> guest port forwards. The base cloud image only runs sshd, so none are
+# enabled here. Uncomment once your rootfs publishes services on 0.0.0.0
+# (not 127.0.0.1) inside the guest.
+ports: []
+#  - name: web
+#    protocol: tcp
+#    host: 8080
+#    guest: 80
+#    url: "http://127.0.0.1:8080"
+
+readiness:
+  # Host ports to TCP-probe before declaring the VM ready (sshd here).
+  tcp_ports:
+    - 2222
+  timeout_seconds: 180
+
+# cloud-init NoCloud seed: injects login credentials and (in cloud-init mode) a
+# DHCP network-config. Set a password (or pass --guest-password) to log in.
+seed:
+  enabled: true
+  username: ubuntu
+  password: ""             # or pass --guest-password lab
+  ssh_key: ""              # path to a public key, or pass --ssh-key

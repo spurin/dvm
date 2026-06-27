@@ -1,0 +1,28 @@
+# Build output (anchored to repo root so cmd/dvm/ is NOT ignored)
+/dist/
+/dvm
+/dvm-*
+
+# dvm runtime data when run from the repo (working-directory-relative defaults)
+/.cache/
+/.state/
+
+# QEMU static-build scratch (sources, dep prefix, staged tree, artifacts)
+/build/qemu/.work/
+/build/qemu/.deps/
+/build/qemu/stage/
+/build/qemu/stage-linux-*/
+/build/qemu/stage-windows-*/
+/build/qemu/*.tar.gz
+/build/qemu/*.sha256
+/build/qemu/oci-layout/
+
+# Local config / scratch
+*.local.yaml
+
+# OS noise
+.DS_Store
+
+# Editor swap files
+*.swp
+.*.swp
