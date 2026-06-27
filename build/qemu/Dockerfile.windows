@@ -1,0 +1,87 @@
+# Cross-compile a static Windows QEMU (x86_64) from upstream source, using the
+# Fedora MinGW-w64 toolchain. No Windows OS required.
+#
+# "Static" on Windows = third-party deps statically linked, so the .exe imports
+# only Windows system DLLs (KERNEL32, ucrtbase, WS2_32, ...). Fedora ships static
+# mingw libs for glib/pcre2/libffi/zlib/gettext/winpthreads; zstd and libslirp
+# are cross-built static from source here using Fedora's mingw64-* wrappers.
+#
+# Build (via build-windows.sh):
+#   docker buildx build -f Dockerfile.windows --target export \
+#     --output type=local,dest=stage-windows-amd64 .
+
+ARG FEDORA=41
+FROM fedora:${FEDORA} AS build
+
+ARG QEMU_VERSION=11.0.1
+ARG QEMU_SHA256=0d235f5820278d914a3155ec27af8e4258d697ea892895570807d69c0cb8cd64
+ARG LIBSLIRP_VERSION=4.9.3
+ARG LIBSLIRP_SHA256=ee698ca4ce05217ca7d520c7f0b1b1228fd7d32922dd32d1051c347152588417
+ARG LIBSLIRP_URL=https://gitlab.freedesktop.org/slirp/libslirp/-/archive/v4.9.3/libslirp-v4.9.3.tar.gz
+ARG ZSTD_VERSION=1.5.7
+ARG ZSTD_SHA256=eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
+ARG ZSTD_URL=https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz
+
+# Native build tools + Fedora's MinGW cross environment (mingw64-filesystem
+# provides the mingw64-meson/mingw64-cmake wrappers and a correctly-configured
+# x86_64-w64-mingw32-pkg-config) + static mingw deps.
+RUN dnf -y install \
+      gcc gcc-c++ make cmake meson ninja-build python3 git \
+      findutils diffutils file which xz tar bzip2 \
+      mingw64-filesystem mingw64-gcc mingw64-gcc-c++ mingw64-binutils \
+      mingw64-headers mingw64-crt \
+      mingw64-glib2 mingw64-glib2-static \
+      mingw64-pcre2-static mingw64-libffi-static mingw64-zlib-static \
+      mingw64-gettext-static mingw64-winpthreads-static \
+      mingw64-win-iconv-static \
+ && dnf clean all
+
+WORKDIR /build
+
+# zstd (static, cross via Fedora's mingw64-cmake — installs into the mingw sysroot).
+RUN curl -fsSL "$ZSTD_URL" -o zstd.tar.gz \
+ && echo "$ZSTD_SHA256  zstd.tar.gz" | sha256sum -c - \
+ && mkdir zstd && tar xf zstd.tar.gz -C zstd --strip-components=1 \
+ && mingw64-cmake -S zstd/build/cmake -B zstd/_b -DCMAKE_BUILD_TYPE=Release \
+      -DZSTD_BUILD_SHARED=OFF -DZSTD_BUILD_STATIC=ON \
+      -DZSTD_BUILD_PROGRAMS=OFF -DZSTD_BUILD_TESTS=OFF \
+ && cmake --build zstd/_b -j"$(nproc)" && cmake --install zstd/_b
+
+# libslirp (static, cross via Fedora's mingw64-meson).
+RUN curl -fsSL "$LIBSLIRP_URL" -o slirp.tar.gz \
+ && echo "$LIBSLIRP_SHA256  slirp.tar.gz" | sha256sum -c - \
+ && mkdir slirp && tar xf slirp.tar.gz -C slirp --strip-components=1 \
+ && cd slirp && mingw64-meson _b --default-library=static \
+      -Dc_args=-DGLIB_STATIC_COMPILATION \
+ && ninja -C _b install
+
+# QEMU source.
+RUN curl -fsSL "https://download.qemu.org/qemu-${QEMU_VERSION}.tar.xz" -o qemu.tar.xz \
+ && echo "$QEMU_SHA256  qemu.tar.xz" | sha256sum -c - \
+ && mkdir qemu && tar xf qemu.tar.xz -C qemu --strip-components=1
+
+# Cross-configure, fully static; enable only what dvm needs. QEMU's configure
+# uses x86_64-w64-mingw32-pkg-config (from mingw64-filesystem) to find the static
+# mingw deps in the sysroot.
+RUN cd qemu && mkdir build && cd build && \
+    ../configure \
+      --cross-prefix=x86_64-w64-mingw32- \
+      --static \
+      --target-list=x86_64-softmmu \
+      --prefix=/stage \
+      --extra-cflags='-DLIBSLIRP_STATIC -DGLIB_STATIC_COMPILATION -DGOBJECT_STATIC_COMPILATION -DGIO_STATIC_COMPILATION -DGMODULE_STATIC_COMPILATION' \
+      --enable-whpx --enable-slirp --enable-fdt=internal --enable-tools --enable-strip \
+      --disable-pixman --disable-docs --disable-werror \
+      --disable-gtk --disable-sdl --disable-vnc --disable-curses --disable-opengl \
+      --disable-gnutls --disable-nettle --disable-gcrypt --disable-capstone \
+      --disable-curl --disable-libssh --disable-bzip2 --disable-snappy --disable-lzo \
+      --disable-libusb --disable-usb-redir --disable-smartcard --disable-spice && \
+    ninja install   # install targets only (skips test exes)
+
+# Trim to a lean portable folder: dvm boots x86_64 guests via direct kernel boot
+# (SeaBIOS), so the large edk2 UEFI firmware blobs (305 MB, mostly other arches)
+# are unused; drop them plus dev artifacts (headers, pkgconfig).
+RUN rm -f /stage/share/edk2-*.fd && rm -rf /stage/include /stage/lib
+
+FROM scratch AS export
+COPY --from=build /stage /stage

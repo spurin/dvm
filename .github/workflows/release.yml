@@ -1,0 +1,136 @@
+name: release
+
+# On a version tag (vX.Y.Z), build the dvm binaries for every platform and the
+# statically-compiled QEMU for each, then publish them all to a GitHub Release.
+# workflow_dispatch builds the artifacts too (downloadable from the run) but only
+# a real tag publishes a Release.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  # ---- static QEMU per platform (reuses build/qemu/*) ----
+  qemu-darwin-arm64:
+    # macos-15 (macOS 15 SDK): the macOS 14 SDK ships a wrong HV_SYS_REG_SMCR_EL1
+    # that trips QEMU's HVF init assertion, so HVF falls back to TCG. SDK 15 fixes it.
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install meson ninja pkg-config cmake
+      - name: Build + verify + archive static QEMU (darwin/arm64)
+        working-directory: build/qemu
+        run: ./build-macos.sh && ./verify.sh && ./archive.sh darwin-arm64 stage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qemu-darwin-arm64
+          path: build/qemu/qemu-darwin-arm64-*.tar.gz*
+          if-no-files-found: error
+
+  qemu-linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-latest }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build + archive static QEMU (linux/${{ matrix.arch }})
+        working-directory: build/qemu
+        run: ./build-linux.sh ${{ matrix.arch }} && ./archive.sh linux-${{ matrix.arch }} stage-linux-${{ matrix.arch }}/stage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qemu-linux-${{ matrix.arch }}
+          path: build/qemu/qemu-linux-${{ matrix.arch }}-*.tar.gz*
+          if-no-files-found: error
+
+  qemu-windows-amd64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build + archive static QEMU (windows/amd64)
+        working-directory: build/qemu
+        run: ./build-windows.sh && ./archive.sh windows-amd64 stage-windows-amd64/stage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qemu-windows-amd64
+          path: build/qemu/qemu-windows-amd64-*.tar.gz*
+          if-no-files-found: error
+
+  # ---- dvm binaries ----
+  dvm-cross:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - name: Build dvm (linux amd64/arm64, windows amd64)
+        run: |
+          mkdir -p out
+          LD="-s -w -X github.com/spurin/diveinto-lab-cli/internal/app.AppVersion=${GITHUB_REF_NAME}"
+          CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags "$LD" -o out/dvm-linux-amd64        ./cmd/dvm
+          CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -trimpath -ldflags "$LD" -o out/dvm-linux-arm64        ./cmd/dvm
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "$LD" -o out/dvm-windows-amd64.exe  ./cmd/dvm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dvm-cross
+          path: out/*
+          if-no-files-found: error
+
+  dvm-darwin:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+      - name: Build + adhoc-codesign dvm (darwin arm64 + amd64, with the vz engine)
+        run: |
+          mkdir -p out
+          LD="-s -w -X github.com/spurin/diveinto-lab-cli/internal/app.AppVersion=${GITHUB_REF_NAME}"
+          # arm64 native cgo
+          CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "$LD" -o out/dvm-darwin-arm64 ./cmd/dvm
+          # amd64 cross cgo (universal macOS SDK)
+          CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 CC="clang -arch x86_64" CXX="clang++ -arch x86_64" \
+            go build -trimpath -ldflags "$LD" -o out/dvm-darwin-amd64 ./cmd/dvm
+          # The vz engine needs the virtualization entitlement (adhoc is fine for
+          # distribution; users clear quarantine on first run).
+          codesign --force --sign - --entitlements build/macos/dvm.entitlements out/dvm-darwin-arm64
+          codesign --force --sign - --entitlements build/macos/dvm.entitlements out/dvm-darwin-amd64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dvm-darwin
+          path: out/*
+          if-no-files-found: error
+
+  # ---- publish ----
+  release:
+    needs: [qemu-darwin-arm64, qemu-linux, qemu-windows-amd64, dvm-cross, dvm-darwin]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dl
+      - name: Collect artifacts + checksums
+        run: |
+          mkdir -p release
+          find dl -type f \( -name 'dvm-*' -o -name 'qemu-*.tar.gz' \) -exec cp {} release/ \;
+          ( cd release && sha256sum * > SHA256SUMS && cat SHA256SUMS )
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

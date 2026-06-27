@@ -1,0 +1,44 @@
+name: qemu-macos-arm64
+
+# Builds the statically-linked QEMU artifact on a hosted Apple-silicon runner.
+# Note: hosted macOS runners lack HVF/nested virt, so this proves static linkage
+# and that HVF/libslirp are compiled in — the HVF *boot* test is run manually on
+# a real Mac (see build/qemu/README.md).
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "build/qemu/**"
+      - ".github/workflows/qemu-macos.yml"
+
+jobs:
+  build:
+    runs-on: macos-15   # Apple silicon (arm64); SDK 15 for working HVF
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build prerequisites
+        run: brew install meson ninja pkg-config cmake
+
+      - name: Build static QEMU
+        working-directory: build/qemu
+        run: ./build-macos.sh
+
+      - name: Verify (static linkage + compiled-in features)
+        working-directory: build/qemu
+        run: ./verify.sh
+
+      - name: Archive binaries (+ sha256)
+        working-directory: build/qemu
+        run: ./archive.sh darwin-arm64 stage
+
+      - name: Upload binary archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-darwin-arm64
+          path: |
+            build/qemu/qemu-darwin-arm64-*.tar.gz
+            build/qemu/qemu-darwin-arm64-*.tar.gz.sha256
+          if-no-files-found: error
